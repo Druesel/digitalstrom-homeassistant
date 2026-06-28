@@ -403,8 +403,9 @@ class DigitalstromSensor(SensorEntity, DigitalstromEntity):
     def update_callback(self, state: Any, raw_state: float | None = None) -> None:
         if not self.enabled:
             return
-        if type(state) is not float:
+        if type(state) not in (int, float):
             return
+        state = float(state)
         if self.entity_description.key == "72":
             # Water Flow Rate: Convert from L/s to m3/h
             state *= 3.6

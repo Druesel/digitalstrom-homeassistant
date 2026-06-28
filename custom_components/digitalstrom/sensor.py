@@ -330,14 +330,14 @@ async def async_setup_entry(
 ) -> None:
     """Set up the sensor platform."""
     apartment = hass.data[DOMAIN][config_entry.unique_id]["apartment"]
-    
+
     sensors = []
     for device in apartment.devices.values():
         for sensor in device.sensors.values():
             sensors.append(DigitalstromSensor(sensor))
     _LOGGER.debug("Adding %i sensors", len(sensors))
     async_add_entities(sensors)
-    
+
     zone_coordinator: DigitalstromClimateCoordinator | None = hass.data[DOMAIN][
         config_entry.unique_id
     ].get("climate_coordinator")
@@ -359,13 +359,14 @@ async def async_setup_entry(
             )
     _LOGGER.debug("Adding %i zone sensors", len(zone_sensors))
     async_add_entities(zone_sensors)
-    
+
     circuit_sensors = []
     for circuit in apartment.circuits.values():
         for sensor in circuit.sensors.values():
             circuit_sensors.append(DigitalstromMeterSensor(sensor))
     _LOGGER.debug("Adding %i circuit sensors", len(circuit_sensors))
     async_add_entities(circuit_sensors)
+
 
 class DigitalstromSensor(SensorEntity, DigitalstromEntity):
     def __init__(self, sensor_channel: DigitalstromSensorChannel):
@@ -376,7 +377,7 @@ class DigitalstromSensor(SensorEntity, DigitalstromEntity):
         self.index = sensor_channel.index
         self.set_type(sensor_channel.sensor_type)
         self._attr_suggested_display_precision = 1
-        self.entity_id = f"{DOMAIN}.{self.device.dsuid}_{self.index}"
+        self.entity_id = f"sensor.{self.device.dsuid}_{self.index}"
 
     def set_type(self, sensor_type: int) -> None:
         self.sensor_type = sensor_type
@@ -399,12 +400,10 @@ class DigitalstromSensor(SensorEntity, DigitalstromEntity):
             self.channel.register_update_callback(self.update_callback)
         )
 
-    def update_callback(
-        self, state: float | None, raw_state: float | None = None
-    ) -> None:
+    def update_callback(self, state: Any, raw_state: float | None = None) -> None:
         if not self.enabled:
             return
-        if state is None:
+        if type(state) is not float:
             return
         if self.entity_description.key == "72":
             # Water Flow Rate: Convert from L/s to m3/h
@@ -439,7 +438,7 @@ class DigitalstromZoneControlValueSensor(
         self._attr_unique_id = (
             f"{self.zone.apartment.dsuid}_zone{self.zone.zone_id}_control_value"
         )
-        self.entity_id = f"{DOMAIN}.{self._attr_unique_id}"
+        self.entity_id = f"sensor.{self._attr_unique_id}"
         self._attr_native_unit_of_measurement = description.native_unit_of_measurement
         self._attr_device_class = description.device_class
         self._attr_state_class = description.state_class
@@ -483,12 +482,11 @@ class DigitalstromMeterSensor(SensorEntity):
         setattr(sensor_channel, "circuit", circuit)
         self.circuit = circuit
         self._attr_unique_id: str = f"{self.circuit.dsuid}_{self.channel.index}"
-        self.entity_id = f"{DOMAIN}.{self._attr_unique_id}"
+        self.entity_id = f"sensor.{self.circuit.dsuid}_{self.channel.index}"
         self._attr_should_poll = True
         self._has_state = False
         self._attributes: dict[str, Any] = {}
         self._state: float | None = None
-        self.entity_id = f"{DOMAIN}.{self.circuit.dsuid}_{self.channel.index}"
         self._state = None
         self._attr_has_entity_name = True
 

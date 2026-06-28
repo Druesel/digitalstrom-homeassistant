@@ -1,0 +1,34 @@
+call_custom_action:
+  name: Call custom action
+  description: Calls a named digitalSTROM User Defined Action, a named fallback from digitalstrom_custom_actions.yaml, or an authenticated digitalSTROM JSON API path.
+  fields:
+    name:
+      name: Name
+      description: Name of the digitalSTROM User Defined Action. If no dSS action matches, digitalstrom_custom_actions.yaml is used as fallback.
+      required: false
+      example: "Sonnenschutz"
+      selector:
+        text:
+    path:
+      name: Path
+      description: Relative dSS JSON API path without the /json/ prefix. Required only when name is not used.
+      required: false
+      example: "path/to/custom/action"
+      selector:
+        text:
+    parameters:
+      name: Parameters Override
+      description: Optional query parameters appended to the path. These override parameters from the named action.
+      required: false
+      advanced: true
+      example:
+        id: 1
+      selector:
+        object:
+    config_entry_id:
+      name: Config entry ID
+      description: Required only when multiple digitalSTROM systems are configured.
+      required: false
+      advanced: true
+      selector:
+        text:

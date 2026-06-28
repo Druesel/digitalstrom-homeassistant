@@ -1,5 +1,6 @@
 import re
 from collections.abc import Callable
+from time import monotonic
 from typing import Self
 
 from .apartment import DigitalstromApartment
@@ -10,6 +11,8 @@ from .const import (
     SUPPORTED_OUTPUT_CHANNELS,
 )
 from .exceptions import ServerError
+
+OUTPUT_VALUE_POLL_BACKOFF_SECONDS = 600
 
 
 class DigitalstromDevice:
@@ -48,6 +51,7 @@ class DigitalstromDevice:
         self.reading_power_state_supported: bool | None = None
         self.unique_device_names: list[str] = []
         self.output_channel_log_count = 0
+        self.output_value_poll_backoff_until = 0.0
 
     def get_parent(self) -> Self:
         if self.parent_device is not None and self.parent_device != self:
@@ -103,6 +107,9 @@ class DigitalstromDevice:
     async def output_channels_get_values(
         self, channels: list[str] | None = None
     ) -> None:
+        if monotonic() < self.output_value_poll_backoff_until:
+            return
+
         channel_values = []
         if channels is None:
             channels = [x.channel_type for x in self.output_channels.values()]
@@ -112,9 +119,26 @@ class DigitalstromDevice:
         channel_values_str = ";".join(channel_values)
         result_channel_values = {}
 
-        result = await self.client.request(
-            f"device/getOutputChannelValue?dsuid={self.dsuid}&channels={channel_values_str}"
-        )
+        try:
+            result = await self.client.request(
+                f"device/getOutputChannelValue?dsuid={self.dsuid}&channels={channel_values_str}"
+            )
+        except ServerError as ex:
+            if "DS485d/Socket Error [-20]" not in str(ex):
+                raise
+            self.output_value_poll_backoff_until = (
+                monotonic() + OUTPUT_VALUE_POLL_BACKOFF_SECONDS
+            )
+            self.apartment.logger.warning(
+                "Skipping output value polling for %s (%s) for %s seconds after dSS "
+                "device response timeout. Commands remain available.",
+                self.name,
+                self.dsuid,
+                OUTPUT_VALUE_POLL_BACKOFF_SECONDS,
+            )
+            return
+
+        self.output_value_poll_backoff_until = 0.0
         if self.output_channel_log_count < 100:
             self.output_channel_log_count += 1
             self.apartment.logger.debug(

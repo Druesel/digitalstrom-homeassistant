@@ -277,7 +277,8 @@ async def _async_find_user_defined_action_path(
 ) -> str | None:
     """Find a User Defined Action path by its configured name."""
     result = await client.request("property/getChildren?path=/usr/events")
-    for child in result:
+    children = result.get("result", result)
+    for child in children:
         child_name = child.get("name")
         if child_name is None:
             continue

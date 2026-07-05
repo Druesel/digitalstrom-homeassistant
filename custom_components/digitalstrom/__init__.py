@@ -7,8 +7,6 @@ from datetime import datetime
 import urllib.parse
 from typing import Any
 
-import voluptuous as vol
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     CONF_HOST,
     CONF_PORT,
@@ -17,6 +15,7 @@ from homeassistant.const import (
     EVENT_HOMEASSISTANT_STOP,
     Platform,
 )
+import voluptuous as vol
 from homeassistant.core import CoreState, HomeAssistant, ServiceCall
 from homeassistant.exceptions import (
     ConfigEntryAuthFailed,
@@ -38,6 +37,7 @@ from .api.apartment import DigitalstromApartment
 from .api.client import DigitalstromClient
 from .api.exceptions import CannotConnect, InvalidAuth, InvalidCertificate, ServerError
 from .const import CONF_DSUID, CONF_SSL, DOMAIN, WEBSOCKET_WATCHDOG_INTERVAL
+from .coordinator import DigitalstromApartmentStatusCoordinator, DigitalstromConfigEntry
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -91,7 +91,9 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     return True
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+async def async_setup_entry(
+    hass: HomeAssistant, entry: DigitalstromConfigEntry
+) -> bool:
     """Set up digitalSTROM from a config entry."""
 
     hass.data.setdefault(DOMAIN, {})
@@ -135,6 +137,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await apartment.get_zones()
         await apartment.get_circuits()
         await apartment.get_devices()
+
+        coordinator = DigitalstromApartmentStatusCoordinator(
+            hass=hass,
+            entry=entry,
+            apartment=apartment,
+        )
+        await coordinator.async_config_entry_first_refresh()
+        entry.runtime_data = coordinator
+
     except (InvalidAuth, InvalidCertificate) as ex:
         raise ConfigEntryAuthFailed(ex) from ex
     except (CannotConnect, ServerError) as ex:
@@ -186,17 +197,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return True
 
 
-async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+async def async_unload_entry(
+    hass: HomeAssistant, entry: DigitalstromConfigEntry
+) -> bool:
     """Unload a config entry."""
     if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
-        entry_data = hass.data[DOMAIN].get(entry.unique_id, {})
-        if (remove_watchdog := entry_data.get("watchdog")) is not None:
+        if entry.unique_id in hass.data[DOMAIN] and (
+            (remove_watchdog := hass.data[DOMAIN][entry.unique_id]["watchdog"])
+            is not None
+        ):
             remove_watchdog()
         if (
-            remove_custom_action_refresh := entry_data.get(CUSTOM_ACTION_CACHE_REFRESH)
+            remove_custom_action_refresh := hass.data[DOMAIN][entry.unique_id].get(
+                CUSTOM_ACTION_CACHE_REFRESH
+            )
         ) is not None:
             remove_custom_action_refresh()
-        await entry_data["client"].stop_event_listener()
+        await hass.data[DOMAIN][entry.unique_id]["client"].stop_event_listener()
         hass.data[DOMAIN].pop(entry.unique_id)
         if not hass.data[DOMAIN]:
             hass.services.async_remove(DOMAIN, SERVICE_CALL_CUSTOM_ACTION)
@@ -377,14 +394,16 @@ def _build_json_path(path: str | None, parameters: dict[str, Any]) -> str:
 
 
 async def async_remove_config_entry_device(
-    hass: HomeAssistant, config_entry: ConfigEntry, device_entry: dr.DeviceEntry
+    hass: HomeAssistant,
+    config_entry: DigitalstromConfigEntry,
+    device_entry: dr.DeviceEntry,
 ) -> bool:
     """Remove config entry from a device if it's no longer present."""
     return True
 
 
 async def migrate_system_dsuid(
-    hass: HomeAssistant, config_entry: ConfigEntry, new_dsuid: str
+    hass: HomeAssistant, config_entry: DigitalstromConfigEntry, new_dsuid: str
 ) -> None:
     old_dsuid = config_entry.unique_id
     if old_dsuid is None or old_dsuid == new_dsuid or len(new_dsuid) < 8:

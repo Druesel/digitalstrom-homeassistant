@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 import urllib.parse
 from typing import Any
 
@@ -26,7 +27,10 @@ from homeassistant.exceptions import (
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
-from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.event import (
+    async_track_time_change,
+    async_track_time_interval,
+)
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.util.yaml import loader as yaml_loader
 
@@ -38,6 +42,8 @@ from .const import CONF_DSUID, CONF_SSL, DOMAIN, WEBSOCKET_WATCHDOG_INTERVAL
 _LOGGER = logging.getLogger(__name__)
 
 SERVICE_CALL_CUSTOM_ACTION = "call_custom_action"
+CUSTOM_ACTION_CACHE = "custom_action_cache"
+CUSTOM_ACTION_CACHE_REFRESH = "custom_action_cache_refresh"
 
 ATTR_CONFIG_ENTRY_ID = "config_entry_id"
 ATTR_NAME = "name"
@@ -125,6 +131,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.data[DOMAIN][entry.unique_id]["client"] = client
         hass.data[DOMAIN][entry.unique_id]["entry_id"] = entry.entry_id
         hass.data[DOMAIN][entry.unique_id]["apartment"] = apartment
+        hass.data[DOMAIN][entry.unique_id][CUSTOM_ACTION_CACHE] = {}
         await apartment.get_zones()
         await apartment.get_circuits()
         await apartment.get_devices()
@@ -135,6 +142,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     _async_register_services(hass)
+
+    await _async_refresh_custom_action_cache(hass, entry.unique_id)
+
+    async def refresh_custom_action_cache(now: datetime) -> None:
+        """Refresh the custom action cache daily."""
+        await _async_refresh_custom_action_cache(hass, entry.unique_id)
+
+    hass.data[DOMAIN][entry.unique_id][CUSTOM_ACTION_CACHE_REFRESH] = (
+        async_track_time_change(
+            hass,
+            refresh_custom_action_cache,
+            hour=3,
+            minute=0,
+            second=0,
+        )
+    )
 
     async def start_watchdog(event: Any = None) -> None:
         """Start websocket watchdog."""
@@ -169,6 +192,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry_data = hass.data[DOMAIN].get(entry.unique_id, {})
         if (remove_watchdog := entry_data.get("watchdog")) is not None:
             remove_watchdog()
+        if (
+            remove_custom_action_refresh := entry_data.get(CUSTOM_ACTION_CACHE_REFRESH)
+        ) is not None:
+            remove_custom_action_refresh()
         await entry_data["client"].stop_event_listener()
         hass.data[DOMAIN].pop(entry.unique_id)
         if not hass.data[DOMAIN]:
@@ -183,10 +210,11 @@ def _async_register_services(hass: HomeAssistant) -> None:
 
     async def async_call_custom_action(call: ServiceCall) -> None:
         """Call an authenticated dSS JSON API path for a custom action."""
-        client = _get_service_client(hass, call.data.get(ATTR_CONFIG_ENTRY_ID))
+        entry_data = _get_service_entry_data(hass, call.data.get(ATTR_CONFIG_ENTRY_ID))
+        client = entry_data["client"]
         action = await _async_resolve_custom_action(
             hass,
-            client,
+            entry_data,
             call.data.get(ATTR_NAME),
             call.data.get(ATTR_PATH),
             call.data.get(ATTR_PARAMETERS, {}),
@@ -202,21 +230,21 @@ def _async_register_services(hass: HomeAssistant) -> None:
     )
 
 
-def _get_service_client(
+def _get_service_entry_data(
     hass: HomeAssistant, config_entry_id: str | None
-) -> DigitalstromClient:
-    """Return the configured client for a service call."""
+) -> dict[str, Any]:
+    """Return the configured entry data for a service call."""
     entries = hass.data.get(DOMAIN, {})
     if config_entry_id is not None:
         for entry_data in entries.values():
             if entry_data.get("entry_id") == config_entry_id:
-                return entry_data["client"]
+                return entry_data
         raise HomeAssistantError(
             f"No digitalSTROM config entry found for config_entry_id {config_entry_id}"
         )
 
     if len(entries) == 1:
-        return next(iter(entries.values()))["client"]
+        return next(iter(entries.values()))
 
     raise HomeAssistantError(
         "Multiple digitalSTROM config entries found; provide config_entry_id"
@@ -225,7 +253,7 @@ def _get_service_client(
 
 async def _async_resolve_custom_action(
     hass: HomeAssistant,
-    client: DigitalstromClient,
+    entry_data: dict[str, Any],
     name: str | None,
     path: str | None,
     parameters: dict[str, Any],
@@ -235,7 +263,8 @@ async def _async_resolve_custom_action(
         raise HomeAssistantError("Provide either name or path")
 
     if name is not None:
-        event_path = await _async_find_user_defined_action_path(client, name)
+        custom_action_cache = entry_data.get(CUSTOM_ACTION_CACHE, {})
+        event_path = custom_action_cache.get(name)
         if event_path is not None:
             return _build_json_path(
                 "event/raise",
@@ -272,12 +301,29 @@ async def _async_resolve_custom_action(
     return _build_json_path(path, parameters)
 
 
-async def _async_find_user_defined_action_path(
-    client: DigitalstromClient, name: str
-) -> str | None:
-    """Find a User Defined Action path by its configured name."""
+async def _async_refresh_custom_action_cache(
+    hass: HomeAssistant, unique_id: str
+) -> None:
+    """Refresh cached User Defined Action paths for a config entry."""
+    entry_data = hass.data.get(DOMAIN, {}).get(unique_id)
+    if entry_data is None:
+        return
+
+    try:
+        entry_data[CUSTOM_ACTION_CACHE] = await _async_get_user_defined_action_paths(
+            entry_data["client"]
+        )
+    except (CannotConnect, ServerError) as ex:
+        _LOGGER.warning("Failed to refresh digitalSTROM custom action cache: %s", ex)
+
+
+async def _async_get_user_defined_action_paths(
+    client: DigitalstromClient,
+) -> dict[str, str]:
+    """Return User Defined Action paths keyed by configured action name."""
     result = await client.request("property/getChildren?path=/usr/events")
     children = result.get("result", result)
+    custom_action_paths = {}
     for child in children:
         child_name = child.get("name")
         if child_name is None:
@@ -289,9 +335,12 @@ async def _async_find_user_defined_action_path(
             )
         except ServerError:
             continue
-        if name_result.get("value") == name:
-            return event_path
-    return None
+        if (action_name := name_result.get("value")) is not None:
+            custom_action_paths[action_name] = event_path
+    _LOGGER.debug(
+        "Cached %s digitalSTROM custom action paths", len(custom_action_paths)
+    )
+    return custom_action_paths
 
 
 def _load_custom_actions(path: str) -> dict[str, Any]:
